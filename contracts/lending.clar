@@ -59,3 +59,26 @@
 
 
 
+(define-map loan-counter principal uint)
+
+(define-map all-loans 
+    (tuple (borrower principal) (loan-id uint))
+    (tuple 
+        (amount uint) 
+        (interest-rate uint) 
+        (deadline uint) 
+        (lender principal)
+    )
+)
+
+(define-public (create-loan-offer (borrower principal) (amount uint) (interest-rate uint) (deadline uint))
+    (let 
+        ((current-count (default-to u0 (map-get? loan-counter borrower))))
+        (map-set loan-counter borrower (+ current-count u1))
+        (map-set all-loans 
+            (tuple (borrower borrower) (loan-id current-count))
+            (tuple (amount amount) (interest-rate interest-rate) (deadline deadline) (lender tx-sender))
+        )
+        (ok "New loan offer created")
+    )
+)
