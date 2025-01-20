@@ -122,3 +122,24 @@
         )
     )
 )
+
+
+(define-map extension-requests principal bool)
+
+(define-public (request-extension (borrower principal) (new-deadline uint))
+    (let ((loan (unwrap! (map-get? loans borrower) (err "No loan found"))))
+        (map-set extension-requests borrower true)
+        (ok "Extension requested")
+    )
+)
+
+(define-public (approve-extension (borrower principal) (new-deadline uint))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (is-requested (default-to false (map-get? extension-requests borrower))))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can approve"))
+        (asserts! is-requested (err "No extension requested"))
+        (map-set loans borrower (merge loan (tuple (deadline new-deadline))))
+        (ok "Extension approved")
+    )
+)
