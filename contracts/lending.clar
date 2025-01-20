@@ -143,3 +143,33 @@
         (ok "Extension approved")
     )
 )
+
+
+
+(define-map collaterals principal 
+    (tuple 
+        (amount uint) 
+        (token principal)
+    )
+)
+
+(define-public (add-collateral (borrower principal) (amount uint) (token principal))
+    (begin
+        (map-set collaterals borrower 
+            (tuple 
+                (amount amount) 
+                (token token)
+            )
+        )
+        (ok "Collateral added successfully")
+    )
+)
+
+(define-public (verify-collateral (borrower principal))
+    (let ((collateral (map-get? collaterals borrower)))
+        (if (is-some collateral)
+            (ok true)
+            (ok false)
+        )
+    )
+)
