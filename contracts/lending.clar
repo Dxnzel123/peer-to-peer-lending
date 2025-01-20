@@ -82,3 +82,24 @@
         (ok "New loan offer created")
     )
 )
+
+
+(define-map borrower-ratings principal 
+    (tuple 
+        (total-rating uint) 
+        (number-of-ratings uint)
+    )
+)
+
+(define-public (rate-borrower (borrower principal) (rating uint))
+    (let 
+        ((current-rating (default-to (tuple (total-rating u0) (number-of-ratings u0)) (map-get? borrower-ratings borrower))))
+        (map-set borrower-ratings borrower
+            (tuple 
+                (total-rating (+ (get total-rating current-rating) rating))
+                (number-of-ratings (+ (get number-of-ratings current-rating) u1))
+            )
+        )
+        (ok "Rating submitted successfully")
+    )
+)
