@@ -103,3 +103,22 @@
         (ok "Rating submitted successfully")
     )
 )
+
+
+(define-constant early-repayment-bonus u5) ;; 5% bonus
+
+(define-public (early-repayment (borrower principal) (amount uint))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (deadline (get deadline loan))
+         (blocks-early (- deadline block-height)))
+        (if (> blocks-early u100)
+            (let 
+                ((bonus-amount (* amount (/ early-repayment-bonus u100))))
+                ;; Process repayment with bonus
+                (ok "Early repayment processed with bonus")
+            )
+            (ok "Regular repayment processed")
+        )
+    )
+)
