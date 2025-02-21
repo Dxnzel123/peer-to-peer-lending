@@ -1,5 +1,3 @@
-
-
 ;; Add status to the loans map
 (define-map loans principal 
     (tuple 
@@ -173,3 +171,153 @@
         )
     )
 )
+
+;; Define pause state
+(define-data-var contract-paused bool false)
+(define-data-var contract-owner principal tx-sender)
+
+;; Toggle pause state
+(define-public (toggle-pause)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) 
+                 (err "Not authorized"))
+        (var-set contract-paused (not (var-get contract-paused)))
+        (ok "Contract pause toggled")
+    ))
+
+;; Check if paused
+(define-public (is-paused)
+    (ok (var-get contract-paused))
+)
+
+
+
+;; Define credit score tiers
+(define-map credit-tiers 
+    uint 
+    (tuple 
+        (min-score uint)
+        (interest-rate uint)
+    )
+)
+
+;; Initialize credit tiers
+(map-set credit-tiers u1 (tuple (min-score u0) (interest-rate u20)))    ;; 20% for low scores
+(map-set credit-tiers u2 (tuple (min-score u50) (interest-rate u15)))   ;; 15% for medium scores
+(map-set credit-tiers u3 (tuple (min-score u80) (interest-rate u10)))   ;; 10% for high scores
+
+;; Get interest rate based on credit score
+(define-public (get-interest-rate (credit-score uint))
+    (let ((tier-1 (unwrap! (map-get? credit-tiers u1) (err "Tier not found")))
+          (tier-2 (unwrap! (map-get? credit-tiers u2) (err "Tier not found")))
+          (tier-3 (unwrap! (map-get? credit-tiers u3) (err "Tier not found"))))
+        (if (>= credit-score (get min-score tier-3))
+            (ok (get interest-rate tier-3))
+            (if (>= credit-score (get min-score tier-2))
+                (ok (get interest-rate tier-2))
+                (ok (get interest-rate tier-1))
+            )
+        )
+    )
+)
+
+
+
+;; Define loan purpose types
+(define-constant BUSINESS "business")
+(define-constant PERSONAL "personal")
+(define-constant EDUCATION "education")
+
+;; Add purpose to loans map
+(define-map loan-purposes principal (string-ascii 20))
+
+;; Set loan purpose
+(define-public (set-loan-purpose (borrower principal) (purpose (string-ascii 20)))
+    (begin
+        (asserts! (or (is-eq purpose BUSINESS) 
+                     (is-eq purpose PERSONAL) 
+                     (is-eq purpose EDUCATION)) 
+                 (err "Invalid loan purpose"))
+        (map-set loan-purposes borrower purpose)
+        (ok "Loan purpose set")
+    ))
+
+
+;; Define payment schedule
+(define-map payment-schedules 
+    principal 
+    (tuple 
+        (installment-amount uint)
+        (payment-frequency uint)
+        (next-payment uint)
+    )
+)
+
+;; Create payment schedule
+(define-public (create-payment-schedule 
+    (borrower principal) 
+    (total-amount uint) 
+    (number-of-installments uint))
+    (begin
+        (asserts! (> number-of-installments u0) (err "Invalid number of installments"))
+        (let ((installment-amount (/ total-amount number-of-installments)))
+            (map-set payment-schedules borrower 
+                (tuple 
+                    (installment-amount installment-amount)
+                    (payment-frequency u30)  ;; 30 blocks between payments
+                    (next-payment (+ block-height u30))
+                ))
+            (ok "Payment schedule created")
+        )
+    ))
+
+
+
+;; Define insurance map
+(define-map loan-insurance 
+    principal 
+    (tuple 
+        (insured-amount uint)
+        (premium uint)
+        (active bool)
+    )
+)
+
+;; Add insurance to loan
+(define-public (add-insurance (borrower principal) (loan-amount uint))
+    (let ((premium (/ loan-amount u20)))  ;; 5% premium
+        (map-set loan-insurance borrower
+            (tuple 
+                (insured-amount loan-amount)
+                (premium premium)
+                (active true)
+            ))
+        (ok "Insurance added to loan")
+    ))
+
+
+
+;; Define referral tracking
+(define-map referrals 
+    principal  ;; referee
+    (tuple 
+        (referrer principal)
+        (bonus uint)
+        (claimed bool)
+    )
+)
+
+;; Create referral
+(define-public (create-referral (referee principal) (referrer principal))
+    (begin
+        (asserts! (not (is-eq referee referrer)) (err "Cannot refer self"))
+        (map-set referrals referee
+            (tuple 
+                (referrer referrer)
+                (bonus u50)  ;; 50 token bonus
+                (claimed false)
+            ))
+        (ok "Referral created")
+    ))
+
+
