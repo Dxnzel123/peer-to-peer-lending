@@ -321,3 +321,210 @@
     ))
 
 
+;; Define blacklist map
+(define-map blacklisted-addresses principal bool)
+(define-data-var blacklist-admin principal tx-sender)
+
+(define-public (add-to-blacklist (address principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get blacklist-admin)) (err "Not authorized"))
+        (map-set blacklisted-addresses address true)
+        (ok "Address blacklisted")
+    ))
+
+(define-public (remove-from-blacklist (address principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get blacklist-admin)) (err "Not authorized"))
+        (map-delete blacklisted-addresses address)
+        (ok "Address removed from blacklist")
+    ))
+
+(define-read-only (is-blacklisted (address principal))
+    (default-to false (map-get? blacklisted-addresses address))
+)
+
+
+(define-map liquidation-thresholds
+    principal
+    (tuple 
+        (threshold uint)
+        (liquidated bool)
+    )
+)
+
+(define-public (set-liquidation-threshold (borrower principal) (threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (map-set liquidation-thresholds borrower
+            (tuple 
+                (threshold threshold)
+                (liquidated false)
+            ))
+        (ok "Threshold set")
+    ))
+
+(define-public (liquidate-loan (borrower principal))
+    (let (
+        (threshold-data (unwrap! (map-get? liquidation-thresholds borrower) (err "No threshold set")))
+        (loan-data (unwrap! (map-get? loans borrower) (err "No loan found")))
+    )
+        (asserts! (not (get liquidated threshold-data)) (err "Already liquidated"))
+        (asserts! (>= block-height (get threshold threshold-data)) (err "Cannot liquidate yet"))
+        (map-set liquidation-thresholds borrower
+            (merge threshold-data (tuple (liquidated true))))
+        (ok "Loan liquidated")
+    ))
+
+    
+
+    (define-map risk-scores
+    principal
+    (tuple 
+        (credit-score uint)
+        (collateral-ratio uint)
+        (payment-history uint)
+        (risk-level (string-ascii 10))
+    )
+)
+
+(define-public (calculate-risk-score (borrower principal))
+    (let (
+        (credit (default-to u0 (get credit-score (map-get? risk-scores borrower))))
+        (collateral (default-to u0 (get collateral-ratio (map-get? risk-scores borrower))))
+        (history (default-to u0 (get payment-history (map-get? risk-scores borrower))))
+    )
+        (map-set risk-scores borrower
+            (tuple 
+                (credit-score credit)
+                (collateral-ratio collateral)
+                (payment-history history)
+                (risk-level (if (> (+ credit collateral history) u80)
+                    "LOW"
+                    (if (> (+ credit collateral history) u50)
+                        "MEDIUM"
+                        "HIGH")))
+            ))
+        (ok "Risk score calculated")
+    ))
+
+
+    (define-map loan-auctions
+    principal
+    (tuple 
+        (start-price uint)
+        (current-price uint)
+        (end-block uint)
+        (highest-bidder (optional principal))
+    )
+)
+
+(define-public (start-auction (loan-id principal) (start-price uint) (duration uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (map-set loan-auctions loan-id
+            (tuple 
+                (start-price start-price)
+                (current-price start-price)
+                (end-block (+ block-height duration))
+                (highest-bidder none)
+            ))
+        (ok "Auction started")
+    ))
+
+(define-public (place-bid (loan-id principal) (bid-amount uint))
+    (let (
+        (auction (unwrap! (map-get? loan-auctions loan-id) (err "No auction found")))
+    )
+        (asserts! (< block-height (get end-block auction)) (err "Auction ended"))
+        (asserts! (> bid-amount (get current-price auction)) (err "Bid too low"))
+        (map-set loan-auctions loan-id
+            (merge auction (tuple 
+                (current-price bid-amount)
+                (highest-bidder (some tx-sender)))))
+        (ok "Bid placed")
+    ))
+
+
+
+    (define-map reward-points
+    principal
+    (tuple 
+        (points uint)
+        (level (string-ascii 10))
+    )
+)
+
+(define-public (earn-points (user principal) (action-points uint))
+    (let (
+        (current-points (default-to (tuple (points u0) (level "BRONZE")) 
+            (map-get? reward-points user)))
+    )
+        (map-set reward-points user
+            (tuple 
+                (points (+ (get points current-points) action-points))
+                (level (if (> (+ (get points current-points) action-points) u1000)
+                    "GOLD"
+                    (if (> (+ (get points current-points) action-points) u500)
+                        "SILVER"
+                        "BRONZE")))
+            ))
+        (ok "Points earned")
+    ))
+
+
+    (define-map purpose-verification
+    principal
+    (tuple 
+        (purpose (string-ascii 20))
+        (verified bool)
+        (verifier (optional principal))
+    )
+)
+
+(define-public (verify-loan-purpose (borrower principal))
+    (let (
+        (purpose-data (unwrap! (map-get? loan-purposes borrower) (err "No purpose set")))
+    )
+        (map-set purpose-verification borrower
+            (tuple 
+                (purpose purpose-data)
+                (verified true)
+                (verifier (some tx-sender))
+            ))
+        (ok "Purpose verified")
+    ))
+
+
+
+    (define-map auto-renewals
+    principal
+    (tuple 
+        (enabled bool)
+        (max-renewals uint)
+        (renewals-used uint)
+    )
+)
+
+(define-public (enable-auto-renewal (borrower principal) (max-renewals uint))
+    (begin
+        (map-set auto-renewals borrower
+            (tuple 
+                (enabled true)
+                (max-renewals max-renewals)
+                (renewals-used u0)
+            ))
+        (ok "Auto-renewal enabled")
+    ))
+
+(define-public (process-auto-renewal (borrower principal))
+    (let (
+        (renewal-data (unwrap! (map-get? auto-renewals borrower) (err "No auto-renewal set")))
+    )
+        (asserts! (get enabled renewal-data) (err "Auto-renewal not enabled"))
+        (asserts! (< (get renewals-used renewal-data) (get max-renewals renewal-data)) 
+            (err "Max renewals reached"))
+        (map-set auto-renewals borrower
+            (merge renewal-data 
+                (tuple (renewals-used (+ (get renewals-used renewal-data) u1)))))
+        (ok "Loan auto-renewed")
+    ))
