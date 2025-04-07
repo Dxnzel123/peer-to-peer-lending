@@ -528,3 +528,231 @@
                 (tuple (renewals-used (+ (get renewals-used renewal-data) u1)))))
         (ok "Loan auto-renewed")
     ))
+
+
+
+(define-map refinance-requests 
+    principal 
+    (tuple 
+        (original-loan-id principal)
+        (new-interest-rate uint)
+        (new-deadline uint)
+        (status (string-ascii 20))
+    )
+)
+
+(define-public (request-refinance (borrower principal) (new-interest-rate uint) (new-deadline uint))
+    (let ((loan (unwrap! (map-get? loans borrower) (err "No loan found"))))
+        (map-set refinance-requests borrower
+            (tuple 
+                (original-loan-id borrower)
+                (new-interest-rate new-interest-rate)
+                (new-deadline new-deadline)
+                (status "PENDING")
+            ))
+        (ok "Refinance requested")
+    )
+)
+
+(define-public (approve-refinance (borrower principal))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (refinance (unwrap! (map-get? refinance-requests borrower) (err "No refinance request"))))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can approve"))
+        (map-set loans borrower 
+            (merge loan 
+                (tuple 
+                    (interest-rate (get new-interest-rate refinance))
+                    (deadline (get new-deadline refinance))
+                    (status "REFINANCED")
+                )
+            ))
+        (map-set refinance-requests borrower
+            (merge refinance (tuple (status "APPROVED"))))
+        (ok "Loan refinanced successfully")
+    )
+)
+
+
+
+
+(define-map loan-bundles 
+    uint 
+    (tuple 
+        (loans (list 20 principal))
+        (total-value uint)
+        (owner principal)
+        (interest-rate uint)
+    )
+)
+
+(define-data-var bundle-counter uint u0)
+
+(define-public (create-loan-bundle (loan-borrowers (list 20 principal)) (bundle-interest-rate uint))
+    (let 
+        ((bundle-id (var-get bundle-counter))
+         (total-value u0))
+        (var-set bundle-counter (+ bundle-id u1))
+        (map-set loan-bundles bundle-id
+            (tuple 
+                (loans loan-borrowers)
+                (total-value total-value)
+                (owner tx-sender)
+                (interest-rate bundle-interest-rate)
+            ))
+        (ok bundle-id)
+    )
+)
+
+(define-public (transfer-bundle (bundle-id uint) (recipient principal))
+    (let ((bundle (unwrap! (map-get? loan-bundles bundle-id) (err "Bundle not found"))))
+        (asserts! (is-eq tx-sender (get owner bundle)) (err "Not the bundle owner"))
+        (map-set loan-bundles bundle-id
+            (merge bundle (tuple (owner recipient))))
+        (ok "Bundle transferred")
+    )
+)
+
+
+
+(define-map marketplace-listings 
+    uint 
+    (tuple 
+        (borrower principal)
+        (asking-price uint)
+        (seller principal)
+        (active bool)
+    )
+)
+
+(define-data-var listing-counter uint u0)
+
+(define-public (list-loan-for-sale (borrower principal) (asking-price uint))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (listing-id (var-get listing-counter)))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can list loan"))
+        (var-set listing-counter (+ listing-id u1))
+        (map-set marketplace-listings listing-id
+            (tuple 
+                (borrower borrower)
+                (asking-price asking-price)
+                (seller tx-sender)
+                (active true)
+            ))
+        (ok listing-id)
+    )
+)
+
+(define-public (buy-loan (listing-id uint))
+    (let 
+        ((listing (unwrap! (map-get? marketplace-listings listing-id) (err "Listing not found")))
+         (borrower (get borrower listing))
+         (loan (unwrap! (map-get? loans borrower) (err "Loan not found"))))
+        (asserts! (get active listing) (err "Listing not active"))
+        (map-set loans borrower
+            (merge loan (tuple (lender tx-sender))))
+        (map-set marketplace-listings listing-id
+            (merge listing (tuple (active false))))
+        (ok "Loan purchased successfully")
+    )
+)
+
+
+
+(define-map loan-grades 
+    principal 
+    (tuple 
+        (grade (string-ascii 2))
+        (score uint)
+        (last-updated uint)
+    )
+)
+
+(define-constant GRADE-A "A+")
+(define-constant GRADE-B "B+")
+(define-constant GRADE-C "C+")
+(define-constant GRADE-D "D+")
+(define-constant GRADE-F "F")
+
+(define-public (grade-loan (borrower principal))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (risk-data (default-to 
+                      (tuple (credit-score u0) (collateral-ratio u0) (payment-history u0) (risk-level "HIGH")) 
+                      (map-get? risk-scores borrower)))
+         (total-score (+ (get credit-score risk-data) (get collateral-ratio risk-data) (get payment-history risk-data))))
+        (map-set loan-grades borrower
+            (tuple 
+                (grade (if (>= total-score u90) 
+                          GRADE-A
+                          (if (>= total-score u75)
+                              GRADE-B
+                              (if (>= total-score u60)
+                                  GRADE-C
+                                  (if (>= total-score u40)
+                                      GRADE-D
+                                      GRADE-F)))))
+                (score total-score)
+                (last-updated block-height)
+            ))
+        (ok "Loan graded")
+    )
+)
+
+(define-read-only (get-loan-grade (borrower principal))
+    (let ((grade-data (map-get? loan-grades borrower)))
+        (if (is-some grade-data)
+            (ok (get grade (unwrap! grade-data (err "No grade"))))
+            (ok "Not graded")
+        )
+    )
+)
+
+
+(define-map loan-health-metrics 
+    principal 
+    (tuple 
+        (health-score uint)
+        (last-payment uint)
+        (missed-payments uint)
+        (status (string-ascii 20))
+    )
+)
+
+(define-public (update-loan-health (borrower principal))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (current-health (default-to 
+                          (tuple 
+                              (health-score u100) 
+                              (last-payment u0) 
+                              (missed-payments u0) 
+                              (status "HEALTHY")) 
+                          (map-get? loan-health-metrics borrower)))
+         (deadline (get deadline loan))
+         (health-status (if (> block-height deadline)
+                           "AT_RISK"
+                           (if (> (- deadline block-height) u100)
+                               "HEALTHY"
+                               "WARNING"))))
+        (map-set loan-health-metrics borrower
+            (tuple 
+                (health-score (if (is-eq health-status "HEALTHY") u100 
+                                 (if (is-eq health-status "WARNING") u70 u30)))
+                (last-payment (get last-payment current-health))
+                (missed-payments (get missed-payments current-health))
+                (status health-status)
+            ))
+        (ok "Loan health updated")
+    )
+)
+
+(define-read-only (get-loan-health (borrower principal))
+    (let ((health-data (map-get? loan-health-metrics borrower)))
+        (if (is-some health-data)
+            (ok (get status (unwrap! health-data (err "No health data"))))
+            (ok "Not monitored")
+        )
+    )
+)
