@@ -756,3 +756,60 @@
         )
     )
 )
+
+
+(define-map participation-pools
+    principal 
+    (tuple 
+        (total-shares uint)
+        (available-shares uint)
+        (share-price uint)
+        (participants (list 20 principal))
+        (min-participation uint)
+    )
+)
+
+(define-map participant-shares
+    (tuple (pool-id principal) (participant principal))
+    uint
+)
+
+(define-public (create-participation-pool 
+    (loan-id principal) 
+    (total-shares uint) 
+    (share-price uint)
+    (min-participation uint)
+)
+    (let ((loan (unwrap! (map-get? loans loan-id) (err "Loan not found"))))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Not loan owner"))
+        (map-set participation-pools loan-id
+            (tuple 
+                (total-shares total-shares)
+                (available-shares total-shares)
+                (share-price share-price)
+                (participants (list))
+                (min-participation min-participation)
+            ))
+        (ok "Pool created")
+    )
+)
+
+(define-public (buy-pool-shares (pool-id principal) (shares uint))
+    (let (
+        (pool (unwrap! (map-get? participation-pools pool-id) (err "Pool not found")))
+    )
+        (asserts! (>= shares (get min-participation pool)) (err "Below minimum"))
+        (asserts! (<= shares (get available-shares pool)) (err "Not enough shares"))
+        (map-set participation-pools pool-id
+            (merge pool (tuple 
+                (available-shares (- (get available-shares pool) shares))
+                (participants (unwrap! (as-max-len? 
+                    (append (get participants pool) tx-sender) u20) 
+                    (err "Too many participants")))
+            )))
+        (map-set participant-shares 
+            (tuple (pool-id pool-id) (participant tx-sender)) 
+            shares)
+        (ok "Shares purchased")
+    )
+)
