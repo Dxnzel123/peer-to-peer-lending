@@ -813,3 +813,45 @@
         (ok "Shares purchased")
     )
 )
+
+
+(define-map interest-model
+    (tuple (utilization uint) (risk-level uint))
+    uint
+)
+
+(define-data-var base-rate uint u500)
+(define-data-var optimal-utilization uint u8000)
+(define-data-var slope1 uint u100)
+(define-data-var slope2 uint u300)
+
+(define-public (calculate-interest-rate (utilization uint) (risk-level uint))
+    (let (
+        (base (var-get base-rate))
+        (optimal (var-get optimal-utilization))
+        (rate (if (<= utilization optimal)
+            (+ base (* (/ utilization u10000) (var-get slope1)))
+            (+ base (* (/ (- utilization optimal) u10000) (var-get slope2)))
+        )))
+        (map-set interest-model 
+            (tuple (utilization utilization) (risk-level risk-level))
+            (+ rate (* risk-level u10)))
+        (ok rate)
+    )
+)
+
+(define-public (update-rate-parameters 
+    (new-base uint) 
+    (new-optimal uint)
+    (new-slope1 uint)
+    (new-slope2 uint)
+)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (var-set base-rate new-base)
+        (var-set optimal-utilization new-optimal)
+        (var-set slope1 new-slope1)
+        (var-set slope2 new-slope2)
+        (ok "Parameters updated")
+    )
+)
