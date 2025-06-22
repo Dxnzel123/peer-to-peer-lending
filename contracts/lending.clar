@@ -855,3 +855,191 @@
         (ok "Parameters updated")
     )
 )
+
+(define-map loan-defaults
+    principal
+    (tuple
+        (default-date uint)
+        (original-amount uint)
+        (outstanding-amount uint)
+        (recovery-attempts uint)
+        (recovered-amount uint)
+        (status (string-ascii 20))
+        (grace-period-end uint)
+    )
+)
+
+(define-map recovery-agents
+    principal
+    (tuple
+        (active bool)
+        (commission-rate uint)
+        (successful-recoveries uint)
+    )
+)
+
+(define-data-var default-grace-period uint u144)
+(define-data-var max-recovery-attempts uint u3)
+(define-data-var recovery-commission uint u1000)
+
+(define-constant DEFAULT-PENDING "PENDING")
+(define-constant DEFAULT-ACTIVE "ACTIVE")
+(define-constant DEFAULT-RECOVERED "RECOVERED")
+(define-constant DEFAULT-WRITTEN-OFF "WRITTEN_OFF")
+
+(define-public (register-recovery-agent (agent principal) (commission-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (asserts! (<= commission-rate u2000) (err "Commission too high"))
+        (map-set recovery-agents agent
+            (tuple
+                (active true)
+                (commission-rate commission-rate)
+                (successful-recoveries u0)
+            ))
+        (ok "Recovery agent registered")
+    )
+)
+
+(define-public (detect-default (borrower principal))
+    (let (
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (deadline (get deadline loan))
+        (amount (get amount loan))
+        (existing-default (map-get? loan-defaults borrower))
+    )
+        (asserts! (> block-height deadline) (err "Loan not overdue"))
+        (asserts! (is-none existing-default) (err "Default already recorded"))
+        (map-set loan-defaults borrower
+            (tuple
+                (default-date block-height)
+                (original-amount amount)
+                (outstanding-amount amount)
+                (recovery-attempts u0)
+                (recovered-amount u0)
+                (status DEFAULT-PENDING)
+                (grace-period-end (+ block-height (var-get default-grace-period)))
+            ))
+        (map-set loans borrower
+            (merge loan (tuple (status "DEFAULTED"))))
+        (ok "Default detected and recorded")
+    )
+)
+
+(define-public (initiate-recovery (borrower principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+    )
+        (asserts! (> block-height (get grace-period-end default-data)) (err "Grace period not ended"))
+        (asserts! (is-eq (get status default-data) DEFAULT-PENDING) (err "Recovery already initiated"))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can initiate"))
+        (map-set loan-defaults borrower
+            (merge default-data (tuple (status DEFAULT-ACTIVE))))
+        (ok "Recovery process initiated")
+    )
+)
+
+(define-public (attempt-recovery (borrower principal) (recovery-amount uint))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (agent-data (unwrap! (map-get? recovery-agents tx-sender) (err "Not registered agent")))
+        (current-attempts (get recovery-attempts default-data))
+        (outstanding (get outstanding-amount default-data))
+        (recovered (get recovered-amount default-data))
+    )
+        (asserts! (get active agent-data) (err "Agent not active"))
+        (asserts! (is-eq (get status default-data) DEFAULT-ACTIVE) (err "Recovery not active"))
+        (asserts! (< current-attempts (var-get max-recovery-attempts)) (err "Max attempts reached"))
+        (asserts! (<= recovery-amount outstanding) (err "Recovery exceeds outstanding"))
+        (map-set loan-defaults borrower
+            (merge default-data (tuple
+                (recovery-attempts (+ current-attempts u1))
+                (recovered-amount (+ recovered recovery-amount))
+                (outstanding-amount (- outstanding recovery-amount))
+                (status (if (is-eq (- outstanding recovery-amount) u0)
+                    DEFAULT-RECOVERED
+                    DEFAULT-ACTIVE))
+            )))
+        (if (> recovery-amount u0)
+            (map-set recovery-agents tx-sender
+                (merge agent-data (tuple
+                    (successful-recoveries (+ (get successful-recoveries agent-data) u1))
+                )))
+            true)
+        (ok "Recovery attempt recorded")
+    )
+)
+
+(define-public (write-off-default (borrower principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (attempts (get recovery-attempts default-data))
+    )
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can write off"))
+        (asserts! (>= attempts (var-get max-recovery-attempts)) (err "Recovery attempts not exhausted"))
+        (asserts! (not (is-eq (get status default-data) DEFAULT-RECOVERED)) (err "Already recovered"))
+        (map-set loan-defaults borrower
+            (merge default-data (tuple (status DEFAULT-WRITTEN-OFF))))
+        (ok "Default written off")
+    )
+)
+
+(define-public (calculate-recovery-commission (borrower principal) (agent principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (agent-data (unwrap! (map-get? recovery-agents agent) (err "Agent not found")))
+        (recovered-amount (get recovered-amount default-data))
+        (commission-rate (get commission-rate agent-data))
+    )
+        (ok (/ (* recovered-amount commission-rate) u10000))
+    )
+)
+
+(define-public (settle-recovery (borrower principal) (agent principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (commission (unwrap! (calculate-recovery-commission borrower agent) (err "Commission calculation failed")))
+        (net-recovery (- (get recovered-amount default-data) commission))
+    )
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can settle"))
+        (asserts! (is-eq (get status default-data) DEFAULT-RECOVERED) (err "Recovery not complete"))
+        (ok (tuple (net-recovery net-recovery) (commission commission)))
+    )
+)
+
+(define-read-only (get-default-status (borrower principal))
+    (let ((default-data (map-get? loan-defaults borrower)))
+        (if (is-some default-data)
+            (ok (get status (unwrap! default-data (err "No default data"))))
+            (ok "NO_DEFAULT")
+        )
+    )
+)
+
+(define-read-only (get-recovery-stats (borrower principal))
+    (let ((default-data (map-get? loan-defaults borrower)))
+        (if (is-some default-data)
+            (let ((data (unwrap! default-data (err "No data"))))
+                (ok (tuple
+                    (recovery-rate (if (> (get original-amount data) u0)
+                        (/ (* (get recovered-amount data) u10000) (get original-amount data))
+                        u0))
+                    (attempts-used (get recovery-attempts data))
+                    (outstanding (get outstanding-amount data))
+                )))
+            (err "No default found")
+        )
+    )
+)
+
+(define-public (update-recovery-parameters (grace-period uint) (max-attempts uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (var-set default-grace-period grace-period)
+        (var-set max-recovery-attempts max-attempts)
+        (ok "Recovery parameters updated")
+    )
+)
