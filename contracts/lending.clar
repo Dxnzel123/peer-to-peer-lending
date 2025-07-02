@@ -1,5 +1,3 @@
-
-
 ;; Add status to the loans map
 (define-map loans principal 
     (tuple 
@@ -171,5 +169,1097 @@
             (ok true)
             (ok false)
         )
+    )
+)
+
+;; Define pause state
+(define-data-var contract-paused bool false)
+(define-data-var contract-owner principal tx-sender)
+
+;; Toggle pause state
+(define-public (toggle-pause)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) 
+                 (err "Not authorized"))
+        (var-set contract-paused (not (var-get contract-paused)))
+        (ok "Contract pause toggled")
+    ))
+
+;; Check if paused
+(define-public (is-paused)
+    (ok (var-get contract-paused))
+)
+
+
+
+;; Define credit score tiers
+(define-map credit-tiers 
+    uint 
+    (tuple 
+        (min-score uint)
+        (interest-rate uint)
+    )
+)
+
+;; Initialize credit tiers
+(map-set credit-tiers u1 (tuple (min-score u0) (interest-rate u20)))    ;; 20% for low scores
+(map-set credit-tiers u2 (tuple (min-score u50) (interest-rate u15)))   ;; 15% for medium scores
+(map-set credit-tiers u3 (tuple (min-score u80) (interest-rate u10)))   ;; 10% for high scores
+
+;; Get interest rate based on credit score
+(define-public (get-interest-rate (credit-score uint))
+    (let ((tier-1 (unwrap! (map-get? credit-tiers u1) (err "Tier not found")))
+          (tier-2 (unwrap! (map-get? credit-tiers u2) (err "Tier not found")))
+          (tier-3 (unwrap! (map-get? credit-tiers u3) (err "Tier not found"))))
+        (if (>= credit-score (get min-score tier-3))
+            (ok (get interest-rate tier-3))
+            (if (>= credit-score (get min-score tier-2))
+                (ok (get interest-rate tier-2))
+                (ok (get interest-rate tier-1))
+            )
+        )
+    )
+)
+
+
+
+;; Define loan purpose types
+(define-constant BUSINESS "business")
+(define-constant PERSONAL "personal")
+(define-constant EDUCATION "education")
+
+;; Add purpose to loans map
+(define-map loan-purposes principal (string-ascii 20))
+
+;; Set loan purpose
+(define-public (set-loan-purpose (borrower principal) (purpose (string-ascii 20)))
+    (begin
+        (asserts! (or (is-eq purpose BUSINESS) 
+                     (is-eq purpose PERSONAL) 
+                     (is-eq purpose EDUCATION)) 
+                 (err "Invalid loan purpose"))
+        (map-set loan-purposes borrower purpose)
+        (ok "Loan purpose set")
+    ))
+
+
+;; Define payment schedule
+(define-map payment-schedules 
+    principal 
+    (tuple 
+        (installment-amount uint)
+        (payment-frequency uint)
+        (next-payment uint)
+    )
+)
+
+;; Create payment schedule
+(define-public (create-payment-schedule 
+    (borrower principal) 
+    (total-amount uint) 
+    (number-of-installments uint))
+    (begin
+        (asserts! (> number-of-installments u0) (err "Invalid number of installments"))
+        (let ((installment-amount (/ total-amount number-of-installments)))
+            (map-set payment-schedules borrower 
+                (tuple 
+                    (installment-amount installment-amount)
+                    (payment-frequency u30)  ;; 30 blocks between payments
+                    (next-payment (+ block-height u30))
+                ))
+            (ok "Payment schedule created")
+        )
+    ))
+
+
+
+;; Define insurance map
+(define-map loan-insurance 
+    principal 
+    (tuple 
+        (insured-amount uint)
+        (premium uint)
+        (active bool)
+    )
+)
+
+;; Add insurance to loan
+(define-public (add-insurance (borrower principal) (loan-amount uint))
+    (let ((premium (/ loan-amount u20)))  ;; 5% premium
+        (map-set loan-insurance borrower
+            (tuple 
+                (insured-amount loan-amount)
+                (premium premium)
+                (active true)
+            ))
+        (ok "Insurance added to loan")
+    ))
+
+
+
+;; Define referral tracking
+(define-map referrals 
+    principal  ;; referee
+    (tuple 
+        (referrer principal)
+        (bonus uint)
+        (claimed bool)
+    )
+)
+
+;; Create referral
+(define-public (create-referral (referee principal) (referrer principal))
+    (begin
+        (asserts! (not (is-eq referee referrer)) (err "Cannot refer self"))
+        (map-set referrals referee
+            (tuple 
+                (referrer referrer)
+                (bonus u50)  ;; 50 token bonus
+                (claimed false)
+            ))
+        (ok "Referral created")
+    ))
+
+
+;; Define blacklist map
+(define-map blacklisted-addresses principal bool)
+(define-data-var blacklist-admin principal tx-sender)
+
+(define-public (add-to-blacklist (address principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get blacklist-admin)) (err "Not authorized"))
+        (map-set blacklisted-addresses address true)
+        (ok "Address blacklisted")
+    ))
+
+(define-public (remove-from-blacklist (address principal))
+    (begin
+        (asserts! (is-eq tx-sender (var-get blacklist-admin)) (err "Not authorized"))
+        (map-delete blacklisted-addresses address)
+        (ok "Address removed from blacklist")
+    ))
+
+(define-read-only (is-blacklisted (address principal))
+    (default-to false (map-get? blacklisted-addresses address))
+)
+
+
+(define-map liquidation-thresholds
+    principal
+    (tuple 
+        (threshold uint)
+        (liquidated bool)
+    )
+)
+
+(define-public (set-liquidation-threshold (borrower principal) (threshold uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (map-set liquidation-thresholds borrower
+            (tuple 
+                (threshold threshold)
+                (liquidated false)
+            ))
+        (ok "Threshold set")
+    ))
+
+(define-public (liquidate-loan (borrower principal))
+    (let (
+        (threshold-data (unwrap! (map-get? liquidation-thresholds borrower) (err "No threshold set")))
+        (loan-data (unwrap! (map-get? loans borrower) (err "No loan found")))
+    )
+        (asserts! (not (get liquidated threshold-data)) (err "Already liquidated"))
+        (asserts! (>= block-height (get threshold threshold-data)) (err "Cannot liquidate yet"))
+        (map-set liquidation-thresholds borrower
+            (merge threshold-data (tuple (liquidated true))))
+        (ok "Loan liquidated")
+    ))
+
+    
+
+    (define-map risk-scores
+    principal
+    (tuple 
+        (credit-score uint)
+        (collateral-ratio uint)
+        (payment-history uint)
+        (risk-level (string-ascii 10))
+    )
+)
+
+(define-public (calculate-risk-score (borrower principal))
+    (let (
+        (credit (default-to u0 (get credit-score (map-get? risk-scores borrower))))
+        (collateral (default-to u0 (get collateral-ratio (map-get? risk-scores borrower))))
+        (history (default-to u0 (get payment-history (map-get? risk-scores borrower))))
+    )
+        (map-set risk-scores borrower
+            (tuple 
+                (credit-score credit)
+                (collateral-ratio collateral)
+                (payment-history history)
+                (risk-level (if (> (+ credit collateral history) u80)
+                    "LOW"
+                    (if (> (+ credit collateral history) u50)
+                        "MEDIUM"
+                        "HIGH")))
+            ))
+        (ok "Risk score calculated")
+    ))
+
+
+    (define-map loan-auctions
+    principal
+    (tuple 
+        (start-price uint)
+        (current-price uint)
+        (end-block uint)
+        (highest-bidder (optional principal))
+    )
+)
+
+(define-public (start-auction (loan-id principal) (start-price uint) (duration uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (map-set loan-auctions loan-id
+            (tuple 
+                (start-price start-price)
+                (current-price start-price)
+                (end-block (+ block-height duration))
+                (highest-bidder none)
+            ))
+        (ok "Auction started")
+    ))
+
+(define-public (place-bid (loan-id principal) (bid-amount uint))
+    (let (
+        (auction (unwrap! (map-get? loan-auctions loan-id) (err "No auction found")))
+    )
+        (asserts! (< block-height (get end-block auction)) (err "Auction ended"))
+        (asserts! (> bid-amount (get current-price auction)) (err "Bid too low"))
+        (map-set loan-auctions loan-id
+            (merge auction (tuple 
+                (current-price bid-amount)
+                (highest-bidder (some tx-sender)))))
+        (ok "Bid placed")
+    ))
+
+
+
+    (define-map reward-points
+    principal
+    (tuple 
+        (points uint)
+        (level (string-ascii 10))
+    )
+)
+
+(define-public (earn-points (user principal) (action-points uint))
+    (let (
+        (current-points (default-to (tuple (points u0) (level "BRONZE")) 
+            (map-get? reward-points user)))
+    )
+        (map-set reward-points user
+            (tuple 
+                (points (+ (get points current-points) action-points))
+                (level (if (> (+ (get points current-points) action-points) u1000)
+                    "GOLD"
+                    (if (> (+ (get points current-points) action-points) u500)
+                        "SILVER"
+                        "BRONZE")))
+            ))
+        (ok "Points earned")
+    ))
+
+
+    (define-map purpose-verification
+    principal
+    (tuple 
+        (purpose (string-ascii 20))
+        (verified bool)
+        (verifier (optional principal))
+    )
+)
+
+(define-public (verify-loan-purpose (borrower principal))
+    (let (
+        (purpose-data (unwrap! (map-get? loan-purposes borrower) (err "No purpose set")))
+    )
+        (map-set purpose-verification borrower
+            (tuple 
+                (purpose purpose-data)
+                (verified true)
+                (verifier (some tx-sender))
+            ))
+        (ok "Purpose verified")
+    ))
+
+
+
+    (define-map auto-renewals
+    principal
+    (tuple 
+        (enabled bool)
+        (max-renewals uint)
+        (renewals-used uint)
+    )
+)
+
+(define-public (enable-auto-renewal (borrower principal) (max-renewals uint))
+    (begin
+        (map-set auto-renewals borrower
+            (tuple 
+                (enabled true)
+                (max-renewals max-renewals)
+                (renewals-used u0)
+            ))
+        (ok "Auto-renewal enabled")
+    ))
+
+(define-public (process-auto-renewal (borrower principal))
+    (let (
+        (renewal-data (unwrap! (map-get? auto-renewals borrower) (err "No auto-renewal set")))
+    )
+        (asserts! (get enabled renewal-data) (err "Auto-renewal not enabled"))
+        (asserts! (< (get renewals-used renewal-data) (get max-renewals renewal-data)) 
+            (err "Max renewals reached"))
+        (map-set auto-renewals borrower
+            (merge renewal-data 
+                (tuple (renewals-used (+ (get renewals-used renewal-data) u1)))))
+        (ok "Loan auto-renewed")
+    ))
+
+
+
+(define-map refinance-requests 
+    principal 
+    (tuple 
+        (original-loan-id principal)
+        (new-interest-rate uint)
+        (new-deadline uint)
+        (status (string-ascii 20))
+    )
+)
+
+(define-public (request-refinance (borrower principal) (new-interest-rate uint) (new-deadline uint))
+    (let ((loan (unwrap! (map-get? loans borrower) (err "No loan found"))))
+        (map-set refinance-requests borrower
+            (tuple 
+                (original-loan-id borrower)
+                (new-interest-rate new-interest-rate)
+                (new-deadline new-deadline)
+                (status "PENDING")
+            ))
+        (ok "Refinance requested")
+    )
+)
+
+(define-public (approve-refinance (borrower principal))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (refinance (unwrap! (map-get? refinance-requests borrower) (err "No refinance request"))))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can approve"))
+        (map-set loans borrower 
+            (merge loan 
+                (tuple 
+                    (interest-rate (get new-interest-rate refinance))
+                    (deadline (get new-deadline refinance))
+                    (status "REFINANCED")
+                )
+            ))
+        (map-set refinance-requests borrower
+            (merge refinance (tuple (status "APPROVED"))))
+        (ok "Loan refinanced successfully")
+    )
+)
+
+
+
+
+(define-map loan-bundles 
+    uint 
+    (tuple 
+        (loans (list 20 principal))
+        (total-value uint)
+        (owner principal)
+        (interest-rate uint)
+    )
+)
+
+(define-data-var bundle-counter uint u0)
+
+(define-public (create-loan-bundle (loan-borrowers (list 20 principal)) (bundle-interest-rate uint))
+    (let 
+        ((bundle-id (var-get bundle-counter))
+         (total-value u0))
+        (var-set bundle-counter (+ bundle-id u1))
+        (map-set loan-bundles bundle-id
+            (tuple 
+                (loans loan-borrowers)
+                (total-value total-value)
+                (owner tx-sender)
+                (interest-rate bundle-interest-rate)
+            ))
+        (ok bundle-id)
+    )
+)
+
+(define-public (transfer-bundle (bundle-id uint) (recipient principal))
+    (let ((bundle (unwrap! (map-get? loan-bundles bundle-id) (err "Bundle not found"))))
+        (asserts! (is-eq tx-sender (get owner bundle)) (err "Not the bundle owner"))
+        (map-set loan-bundles bundle-id
+            (merge bundle (tuple (owner recipient))))
+        (ok "Bundle transferred")
+    )
+)
+
+
+
+(define-map marketplace-listings 
+    uint 
+    (tuple 
+        (borrower principal)
+        (asking-price uint)
+        (seller principal)
+        (active bool)
+    )
+)
+
+(define-data-var listing-counter uint u0)
+
+(define-public (list-loan-for-sale (borrower principal) (asking-price uint))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (listing-id (var-get listing-counter)))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can list loan"))
+        (var-set listing-counter (+ listing-id u1))
+        (map-set marketplace-listings listing-id
+            (tuple 
+                (borrower borrower)
+                (asking-price asking-price)
+                (seller tx-sender)
+                (active true)
+            ))
+        (ok listing-id)
+    )
+)
+
+(define-public (buy-loan (listing-id uint))
+    (let 
+        ((listing (unwrap! (map-get? marketplace-listings listing-id) (err "Listing not found")))
+         (borrower (get borrower listing))
+         (loan (unwrap! (map-get? loans borrower) (err "Loan not found"))))
+        (asserts! (get active listing) (err "Listing not active"))
+        (map-set loans borrower
+            (merge loan (tuple (lender tx-sender))))
+        (map-set marketplace-listings listing-id
+            (merge listing (tuple (active false))))
+        (ok "Loan purchased successfully")
+    )
+)
+
+
+
+(define-map loan-grades 
+    principal 
+    (tuple 
+        (grade (string-ascii 2))
+        (score uint)
+        (last-updated uint)
+    )
+)
+
+(define-constant GRADE-A "A+")
+(define-constant GRADE-B "B+")
+(define-constant GRADE-C "C+")
+(define-constant GRADE-D "D+")
+(define-constant GRADE-F "F")
+
+(define-public (grade-loan (borrower principal))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (risk-data (default-to 
+                      (tuple (credit-score u0) (collateral-ratio u0) (payment-history u0) (risk-level "HIGH")) 
+                      (map-get? risk-scores borrower)))
+         (total-score (+ (get credit-score risk-data) (get collateral-ratio risk-data) (get payment-history risk-data))))
+        (map-set loan-grades borrower
+            (tuple 
+                (grade (if (>= total-score u90) 
+                          GRADE-A
+                          (if (>= total-score u75)
+                              GRADE-B
+                              (if (>= total-score u60)
+                                  GRADE-C
+                                  (if (>= total-score u40)
+                                      GRADE-D
+                                      GRADE-F)))))
+                (score total-score)
+                (last-updated block-height)
+            ))
+        (ok "Loan graded")
+    )
+)
+
+(define-read-only (get-loan-grade (borrower principal))
+    (let ((grade-data (map-get? loan-grades borrower)))
+        (if (is-some grade-data)
+            (ok (get grade (unwrap! grade-data (err "No grade"))))
+            (ok "Not graded")
+        )
+    )
+)
+
+
+(define-map loan-health-metrics 
+    principal 
+    (tuple 
+        (health-score uint)
+        (last-payment uint)
+        (missed-payments uint)
+        (status (string-ascii 20))
+    )
+)
+
+(define-public (update-loan-health (borrower principal))
+    (let 
+        ((loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+         (current-health (default-to 
+                          (tuple 
+                              (health-score u100) 
+                              (last-payment u0) 
+                              (missed-payments u0) 
+                              (status "HEALTHY")) 
+                          (map-get? loan-health-metrics borrower)))
+         (deadline (get deadline loan))
+         (health-status (if (> block-height deadline)
+                           "AT_RISK"
+                           (if (> (- deadline block-height) u100)
+                               "HEALTHY"
+                               "WARNING"))))
+        (map-set loan-health-metrics borrower
+            (tuple 
+                (health-score (if (is-eq health-status "HEALTHY") u100 
+                                 (if (is-eq health-status "WARNING") u70 u30)))
+                (last-payment (get last-payment current-health))
+                (missed-payments (get missed-payments current-health))
+                (status health-status)
+            ))
+        (ok "Loan health updated")
+    )
+)
+
+(define-read-only (get-loan-health (borrower principal))
+    (let ((health-data (map-get? loan-health-metrics borrower)))
+        (if (is-some health-data)
+            (ok (get status (unwrap! health-data (err "No health data"))))
+            (ok "Not monitored")
+        )
+    )
+)
+
+
+(define-map participation-pools
+    principal 
+    (tuple 
+        (total-shares uint)
+        (available-shares uint)
+        (share-price uint)
+        (participants (list 20 principal))
+        (min-participation uint)
+    )
+)
+
+(define-map participant-shares
+    (tuple (pool-id principal) (participant principal))
+    uint
+)
+
+(define-public (create-participation-pool 
+    (loan-id principal) 
+    (total-shares uint) 
+    (share-price uint)
+    (min-participation uint)
+)
+    (let ((loan (unwrap! (map-get? loans loan-id) (err "Loan not found"))))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Not loan owner"))
+        (map-set participation-pools loan-id
+            (tuple 
+                (total-shares total-shares)
+                (available-shares total-shares)
+                (share-price share-price)
+                (participants (list))
+                (min-participation min-participation)
+            ))
+        (ok "Pool created")
+    )
+)
+
+(define-public (buy-pool-shares (pool-id principal) (shares uint))
+    (let (
+        (pool (unwrap! (map-get? participation-pools pool-id) (err "Pool not found")))
+    )
+        (asserts! (>= shares (get min-participation pool)) (err "Below minimum"))
+        (asserts! (<= shares (get available-shares pool)) (err "Not enough shares"))
+        (map-set participation-pools pool-id
+            (merge pool (tuple 
+                (available-shares (- (get available-shares pool) shares))
+                (participants (unwrap! (as-max-len? 
+                    (append (get participants pool) tx-sender) u20) 
+                    (err "Too many participants")))
+            )))
+        (map-set participant-shares 
+            (tuple (pool-id pool-id) (participant tx-sender)) 
+            shares)
+        (ok "Shares purchased")
+    )
+)
+
+
+(define-map interest-model
+    (tuple (utilization uint) (risk-level uint))
+    uint
+)
+
+(define-data-var base-rate uint u500)
+(define-data-var optimal-utilization uint u8000)
+(define-data-var slope1 uint u100)
+(define-data-var slope2 uint u300)
+
+(define-public (calculate-interest-rate (utilization uint) (risk-level uint))
+    (let (
+        (base (var-get base-rate))
+        (optimal (var-get optimal-utilization))
+        (rate (if (<= utilization optimal)
+            (+ base (* (/ utilization u10000) (var-get slope1)))
+            (+ base (* (/ (- utilization optimal) u10000) (var-get slope2)))
+        )))
+        (map-set interest-model 
+            (tuple (utilization utilization) (risk-level risk-level))
+            (+ rate (* risk-level u10)))
+        (ok rate)
+    )
+)
+
+(define-public (update-rate-parameters 
+    (new-base uint) 
+    (new-optimal uint)
+    (new-slope1 uint)
+    (new-slope2 uint)
+)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (var-set base-rate new-base)
+        (var-set optimal-utilization new-optimal)
+        (var-set slope1 new-slope1)
+        (var-set slope2 new-slope2)
+        (ok "Parameters updated")
+    )
+)
+
+(define-map loan-defaults
+    principal
+    (tuple
+        (default-date uint)
+        (original-amount uint)
+        (outstanding-amount uint)
+        (recovery-attempts uint)
+        (recovered-amount uint)
+        (status (string-ascii 20))
+        (grace-period-end uint)
+    )
+)
+
+(define-map recovery-agents
+    principal
+    (tuple
+        (active bool)
+        (commission-rate uint)
+        (successful-recoveries uint)
+    )
+)
+
+(define-data-var default-grace-period uint u144)
+(define-data-var max-recovery-attempts uint u3)
+(define-data-var recovery-commission uint u1000)
+
+(define-constant DEFAULT-PENDING "PENDING")
+(define-constant DEFAULT-ACTIVE "ACTIVE")
+(define-constant DEFAULT-RECOVERED "RECOVERED")
+(define-constant DEFAULT-WRITTEN-OFF "WRITTEN_OFF")
+
+(define-public (register-recovery-agent (agent principal) (commission-rate uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (asserts! (<= commission-rate u2000) (err "Commission too high"))
+        (map-set recovery-agents agent
+            (tuple
+                (active true)
+                (commission-rate commission-rate)
+                (successful-recoveries u0)
+            ))
+        (ok "Recovery agent registered")
+    )
+)
+
+(define-public (detect-default (borrower principal))
+    (let (
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (deadline (get deadline loan))
+        (amount (get amount loan))
+        (existing-default (map-get? loan-defaults borrower))
+    )
+        (asserts! (> block-height deadline) (err "Loan not overdue"))
+        (asserts! (is-none existing-default) (err "Default already recorded"))
+        (map-set loan-defaults borrower
+            (tuple
+                (default-date block-height)
+                (original-amount amount)
+                (outstanding-amount amount)
+                (recovery-attempts u0)
+                (recovered-amount u0)
+                (status DEFAULT-PENDING)
+                (grace-period-end (+ block-height (var-get default-grace-period)))
+            ))
+        (map-set loans borrower
+            (merge loan (tuple (status "DEFAULTED"))))
+        (ok "Default detected and recorded")
+    )
+)
+
+(define-public (initiate-recovery (borrower principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+    )
+        (asserts! (> block-height (get grace-period-end default-data)) (err "Grace period not ended"))
+        (asserts! (is-eq (get status default-data) DEFAULT-PENDING) (err "Recovery already initiated"))
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can initiate"))
+        (map-set loan-defaults borrower
+            (merge default-data (tuple (status DEFAULT-ACTIVE))))
+        (ok "Recovery process initiated")
+    )
+)
+
+(define-public (attempt-recovery (borrower principal) (recovery-amount uint))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (agent-data (unwrap! (map-get? recovery-agents tx-sender) (err "Not registered agent")))
+        (current-attempts (get recovery-attempts default-data))
+        (outstanding (get outstanding-amount default-data))
+        (recovered (get recovered-amount default-data))
+    )
+        (asserts! (get active agent-data) (err "Agent not active"))
+        (asserts! (is-eq (get status default-data) DEFAULT-ACTIVE) (err "Recovery not active"))
+        (asserts! (< current-attempts (var-get max-recovery-attempts)) (err "Max attempts reached"))
+        (asserts! (<= recovery-amount outstanding) (err "Recovery exceeds outstanding"))
+        (map-set loan-defaults borrower
+            (merge default-data (tuple
+                (recovery-attempts (+ current-attempts u1))
+                (recovered-amount (+ recovered recovery-amount))
+                (outstanding-amount (- outstanding recovery-amount))
+                (status (if (is-eq (- outstanding recovery-amount) u0)
+                    DEFAULT-RECOVERED
+                    DEFAULT-ACTIVE))
+            )))
+        (if (> recovery-amount u0)
+            (map-set recovery-agents tx-sender
+                (merge agent-data (tuple
+                    (successful-recoveries (+ (get successful-recoveries agent-data) u1))
+                )))
+            true)
+        (ok "Recovery attempt recorded")
+    )
+)
+
+(define-public (write-off-default (borrower principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (attempts (get recovery-attempts default-data))
+    )
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can write off"))
+        (asserts! (>= attempts (var-get max-recovery-attempts)) (err "Recovery attempts not exhausted"))
+        (asserts! (not (is-eq (get status default-data) DEFAULT-RECOVERED)) (err "Already recovered"))
+        (map-set loan-defaults borrower
+            (merge default-data (tuple (status DEFAULT-WRITTEN-OFF))))
+        (ok "Default written off")
+    )
+)
+
+(define-public (calculate-recovery-commission (borrower principal) (agent principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (agent-data (unwrap! (map-get? recovery-agents agent) (err "Agent not found")))
+        (recovered-amount (get recovered-amount default-data))
+        (commission-rate (get commission-rate agent-data))
+    )
+        (ok (/ (* recovered-amount commission-rate) u10000))
+    )
+)
+
+(define-public (settle-recovery (borrower principal) (agent principal))
+    (let (
+        (default-data (unwrap! (map-get? loan-defaults borrower) (err "No default found")))
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (commission (unwrap! (calculate-recovery-commission borrower agent) (err "Commission calculation failed")))
+        (net-recovery (- (get recovered-amount default-data) commission))
+    )
+        (asserts! (is-eq tx-sender (get lender loan)) (err "Only lender can settle"))
+        (asserts! (is-eq (get status default-data) DEFAULT-RECOVERED) (err "Recovery not complete"))
+        (ok (tuple (net-recovery net-recovery) (commission commission)))
+    )
+)
+
+(define-read-only (get-default-status (borrower principal))
+    (let ((default-data (map-get? loan-defaults borrower)))
+        (if (is-some default-data)
+            (ok (get status (unwrap! default-data (err "No default data"))))
+            (ok "NO_DEFAULT")
+        )
+    )
+)
+
+(define-read-only (get-recovery-stats (borrower principal))
+    (let ((default-data (map-get? loan-defaults borrower)))
+        (if (is-some default-data)
+            (let ((data (unwrap! default-data (err "No data"))))
+                (ok (tuple
+                    (recovery-rate (if (> (get original-amount data) u0)
+                        (/ (* (get recovered-amount data) u10000) (get original-amount data))
+                        u0))
+                    (attempts-used (get recovery-attempts data))
+                    (outstanding (get outstanding-amount data))
+                )))
+            (err "No default found")
+        )
+    )
+)
+
+(define-public (update-recovery-parameters (grace-period uint) (max-attempts uint))
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (var-set default-grace-period grace-period)
+        (var-set max-recovery-attempts max-attempts)
+        (ok "Recovery parameters updated")
+    )
+)
+
+(define-map social-impact-categories
+    (string-ascii 20)
+    (tuple
+        (weight uint)
+        (max-score uint)
+        (description (string-ascii 50))
+    )
+)
+
+(define-map borrower-impact-scores
+    principal
+    (tuple
+        (total-score uint)
+        (environmental-score uint)
+        (social-score uint)
+        (education-score uint)
+        (healthcare-score uint)
+        (verified bool)
+        (last-updated uint)
+    )
+)
+
+(define-map impact-verifications
+    (tuple (borrower principal) (category (string-ascii 20)))
+    (tuple
+        (evidence-hash (string-ascii 64))
+        (verified bool)
+        (verifier principal)
+        (verification-date uint)
+        (impact-value uint)
+    )
+)
+
+(define-map impact-rate-discounts
+    principal
+    (tuple
+        (discount-percentage uint)
+        (expires-at uint)
+        (qualification-score uint)
+    )
+)
+
+(define-data-var impact-verifier principal tx-sender)
+(define-data-var min-impact-score-for-discount uint u50)
+(define-data-var max-impact-discount uint u500)
+
+(define-constant CATEGORY-ENVIRONMENT "ENVIRONMENT")
+(define-constant CATEGORY-SOCIAL "SOCIAL")
+(define-constant CATEGORY-EDUCATION "EDUCATION")
+(define-constant CATEGORY-HEALTHCARE "HEALTHCARE")
+
+(map-set social-impact-categories CATEGORY-ENVIRONMENT
+    (tuple (weight u30) (max-score u100) (description "Environmental sustainability projects")))
+(map-set social-impact-categories CATEGORY-SOCIAL
+    (tuple (weight u25) (max-score u100) (description "Community development projects")))
+(map-set social-impact-categories CATEGORY-EDUCATION
+    (tuple (weight u25) (max-score u100) (description "Educational advancement initiatives")))
+(map-set social-impact-categories CATEGORY-HEALTHCARE
+    (tuple (weight u20) (max-score u100) (description "Healthcare access improvement")))
+
+(define-public (submit-impact-evidence 
+    (borrower principal) 
+    (category (string-ascii 20)) 
+    (evidence-hash (string-ascii 64))
+    (claimed-impact uint)
+)
+    (let (
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (category-data (unwrap! (map-get? social-impact-categories category) (err "Invalid category")))
+    )
+        (asserts! (is-eq tx-sender borrower) (err "Only borrower can submit"))
+        (asserts! (<= claimed-impact (get max-score category-data)) (err "Impact claim too high"))
+        (map-set impact-verifications 
+            (tuple (borrower borrower) (category category))
+            (tuple
+                (evidence-hash evidence-hash)
+                (verified false)
+                (verifier (var-get impact-verifier))
+                (verification-date u0)
+                (impact-value claimed-impact)
+            ))
+        (ok "Impact evidence submitted for verification")
+    )
+)
+
+(define-public (verify-impact-evidence 
+    (borrower principal) 
+    (category (string-ascii 20))
+    (approved bool)
+    (verified-impact uint)
+)
+    (let (
+        (verification-key (tuple (borrower borrower) (category category)))
+        (evidence (unwrap! (map-get? impact-verifications verification-key) (err "No evidence found")))
+        (category-data (unwrap! (map-get? social-impact-categories category) (err "Invalid category")))
+    )
+        (asserts! (is-eq tx-sender (var-get impact-verifier)) (err "Not authorized verifier"))
+        (asserts! (<= verified-impact (get max-score category-data)) (err "Verified impact too high"))
+        (map-set impact-verifications verification-key
+            (merge evidence (tuple
+                (verified approved)
+                (verification-date block-height)
+                (impact-value (if approved verified-impact u0))
+            )))
+        (if approved
+            (begin
+                (unwrap! (calculate-borrower-impact-score borrower) (err "Impact score calculation failed"))
+                (ok "Impact verified and score updated"))
+            (ok "Impact verification rejected"))
+    )
+)
+
+(define-public (calculate-borrower-impact-score (borrower principal))
+    (let (
+        (env-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-ENVIRONMENT))))
+        (social-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-SOCIAL))))
+        (edu-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-EDUCATION))))
+        (health-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-HEALTHCARE))))
+        (env-score (if (and (is-some env-verification) (get verified (unwrap-panic env-verification)))
+            (get impact-value (unwrap-panic env-verification)) u0))
+        (social-score (if (and (is-some social-verification) (get verified (unwrap-panic social-verification)))
+            (get impact-value (unwrap-panic social-verification)) u0))
+        (edu-score (if (and (is-some edu-verification) (get verified (unwrap-panic edu-verification)))
+            (get impact-value (unwrap-panic edu-verification)) u0))
+        (health-score (if (and (is-some health-verification) (get verified (unwrap-panic health-verification)))
+            (get impact-value (unwrap-panic health-verification)) u0))
+        (weighted-total (+ (* env-score u30) (* social-score u25) (* edu-score u25) (* health-score u20)))
+        (final-score (/ weighted-total u100))
+    )
+        (map-set borrower-impact-scores borrower
+            (tuple
+                (total-score final-score)
+                (environmental-score env-score)
+                (social-score social-score)
+                (education-score edu-score)
+                (healthcare-score health-score)
+                (verified true)
+                (last-updated block-height)
+            ))
+        (if (>= final-score (var-get min-impact-score-for-discount))
+            (grant-impact-discount borrower final-score)
+            (ok "Score calculated"))
+    )
+)
+
+(define-public (grant-impact-discount (borrower principal) (impact-score uint))
+    (let (
+        (discount-rate (if (>= impact-score u80) 
+            (var-get max-impact-discount)
+            (/ (* impact-score (var-get max-impact-discount)) u100)))
+        (expiry (+ block-height u8760))
+    )
+        (map-set impact-rate-discounts borrower
+            (tuple
+                (discount-percentage discount-rate)
+                (expires-at expiry)
+                (qualification-score impact-score)
+            ))
+        (ok "Impact discount granted")
+    )
+)
+
+(define-public (apply-impact-discount (borrower principal) (base-rate-new uint))
+    (let (
+        (discount (map-get? impact-rate-discounts borrower))
+    )
+        (if (is-some discount)
+            (let (
+                (discount-data (unwrap-panic discount))
+                (discount-percentage (get discount-percentage discount-data))
+            )
+                (if (> (get expires-at discount-data) block-height)
+                    (ok (- base-rate-new (/ (* base-rate-new discount-percentage) u10000)))
+                    (ok base-rate-new)))
+            (ok base-rate-new))
+    )
+)
+
+(define-read-only (get-borrower-impact-summary (borrower principal))
+    (let (
+        (impact-data (map-get? borrower-impact-scores borrower))
+        (discount-data (map-get? impact-rate-discounts borrower))
+    )
+        (ok (tuple
+            (impact-score (if (is-some impact-data) 
+                (get total-score (unwrap-panic impact-data)) u0))
+            (has-discount (is-some discount-data))
+            (discount-expires (if (is-some discount-data) 
+                (get expires-at (unwrap-panic discount-data)) u0))
+            (verified (if (is-some impact-data) 
+                (get verified (unwrap-panic impact-data)) false))
+        ))
+    )
+)
+
+(define-read-only (get-platform-impact-metrics)
+    (ok (tuple
+        (total-verified-borrowers u0)
+        (total-environmental-projects u0)
+        (total-social-projects u0)
+        (total-education-projects u0)
+        (total-healthcare-projects u0)
+        (average-impact-score u0)
+    ))
+)
+
+(define-public (update-impact-parameters 
+    (new-verifier principal)
+    (new-min-score uint)
+    (new-max-discount uint)
+)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (var-set impact-verifier new-verifier)
+        (var-set min-impact-score-for-discount new-min-score)
+        (var-set max-impact-discount new-max-discount)
+        (ok "Impact parameters updated")
     )
 )
