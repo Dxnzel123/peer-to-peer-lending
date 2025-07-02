@@ -1043,3 +1043,223 @@
         (ok "Recovery parameters updated")
     )
 )
+
+(define-map social-impact-categories
+    (string-ascii 20)
+    (tuple
+        (weight uint)
+        (max-score uint)
+        (description (string-ascii 50))
+    )
+)
+
+(define-map borrower-impact-scores
+    principal
+    (tuple
+        (total-score uint)
+        (environmental-score uint)
+        (social-score uint)
+        (education-score uint)
+        (healthcare-score uint)
+        (verified bool)
+        (last-updated uint)
+    )
+)
+
+(define-map impact-verifications
+    (tuple (borrower principal) (category (string-ascii 20)))
+    (tuple
+        (evidence-hash (string-ascii 64))
+        (verified bool)
+        (verifier principal)
+        (verification-date uint)
+        (impact-value uint)
+    )
+)
+
+(define-map impact-rate-discounts
+    principal
+    (tuple
+        (discount-percentage uint)
+        (expires-at uint)
+        (qualification-score uint)
+    )
+)
+
+(define-data-var impact-verifier principal tx-sender)
+(define-data-var min-impact-score-for-discount uint u50)
+(define-data-var max-impact-discount uint u500)
+
+(define-constant CATEGORY-ENVIRONMENT "ENVIRONMENT")
+(define-constant CATEGORY-SOCIAL "SOCIAL")
+(define-constant CATEGORY-EDUCATION "EDUCATION")
+(define-constant CATEGORY-HEALTHCARE "HEALTHCARE")
+
+(map-set social-impact-categories CATEGORY-ENVIRONMENT
+    (tuple (weight u30) (max-score u100) (description "Environmental sustainability projects")))
+(map-set social-impact-categories CATEGORY-SOCIAL
+    (tuple (weight u25) (max-score u100) (description "Community development projects")))
+(map-set social-impact-categories CATEGORY-EDUCATION
+    (tuple (weight u25) (max-score u100) (description "Educational advancement initiatives")))
+(map-set social-impact-categories CATEGORY-HEALTHCARE
+    (tuple (weight u20) (max-score u100) (description "Healthcare access improvement")))
+
+(define-public (submit-impact-evidence 
+    (borrower principal) 
+    (category (string-ascii 20)) 
+    (evidence-hash (string-ascii 64))
+    (claimed-impact uint)
+)
+    (let (
+        (loan (unwrap! (map-get? loans borrower) (err "No loan found")))
+        (category-data (unwrap! (map-get? social-impact-categories category) (err "Invalid category")))
+    )
+        (asserts! (is-eq tx-sender borrower) (err "Only borrower can submit"))
+        (asserts! (<= claimed-impact (get max-score category-data)) (err "Impact claim too high"))
+        (map-set impact-verifications 
+            (tuple (borrower borrower) (category category))
+            (tuple
+                (evidence-hash evidence-hash)
+                (verified false)
+                (verifier (var-get impact-verifier))
+                (verification-date u0)
+                (impact-value claimed-impact)
+            ))
+        (ok "Impact evidence submitted for verification")
+    )
+)
+
+(define-public (verify-impact-evidence 
+    (borrower principal) 
+    (category (string-ascii 20))
+    (approved bool)
+    (verified-impact uint)
+)
+    (let (
+        (verification-key (tuple (borrower borrower) (category category)))
+        (evidence (unwrap! (map-get? impact-verifications verification-key) (err "No evidence found")))
+        (category-data (unwrap! (map-get? social-impact-categories category) (err "Invalid category")))
+    )
+        (asserts! (is-eq tx-sender (var-get impact-verifier)) (err "Not authorized verifier"))
+        (asserts! (<= verified-impact (get max-score category-data)) (err "Verified impact too high"))
+        (map-set impact-verifications verification-key
+            (merge evidence (tuple
+                (verified approved)
+                (verification-date block-height)
+                (impact-value (if approved verified-impact u0))
+            )))
+        (if approved
+            (begin
+                (unwrap! (calculate-borrower-impact-score borrower) (err "Impact score calculation failed"))
+                (ok "Impact verified and score updated"))
+            (ok "Impact verification rejected"))
+    )
+)
+
+(define-public (calculate-borrower-impact-score (borrower principal))
+    (let (
+        (env-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-ENVIRONMENT))))
+        (social-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-SOCIAL))))
+        (edu-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-EDUCATION))))
+        (health-verification (map-get? impact-verifications (tuple (borrower borrower) (category CATEGORY-HEALTHCARE))))
+        (env-score (if (and (is-some env-verification) (get verified (unwrap-panic env-verification)))
+            (get impact-value (unwrap-panic env-verification)) u0))
+        (social-score (if (and (is-some social-verification) (get verified (unwrap-panic social-verification)))
+            (get impact-value (unwrap-panic social-verification)) u0))
+        (edu-score (if (and (is-some edu-verification) (get verified (unwrap-panic edu-verification)))
+            (get impact-value (unwrap-panic edu-verification)) u0))
+        (health-score (if (and (is-some health-verification) (get verified (unwrap-panic health-verification)))
+            (get impact-value (unwrap-panic health-verification)) u0))
+        (weighted-total (+ (* env-score u30) (* social-score u25) (* edu-score u25) (* health-score u20)))
+        (final-score (/ weighted-total u100))
+    )
+        (map-set borrower-impact-scores borrower
+            (tuple
+                (total-score final-score)
+                (environmental-score env-score)
+                (social-score social-score)
+                (education-score edu-score)
+                (healthcare-score health-score)
+                (verified true)
+                (last-updated block-height)
+            ))
+        (if (>= final-score (var-get min-impact-score-for-discount))
+            (grant-impact-discount borrower final-score)
+            (ok "Score calculated"))
+    )
+)
+
+(define-public (grant-impact-discount (borrower principal) (impact-score uint))
+    (let (
+        (discount-rate (if (>= impact-score u80) 
+            (var-get max-impact-discount)
+            (/ (* impact-score (var-get max-impact-discount)) u100)))
+        (expiry (+ block-height u8760))
+    )
+        (map-set impact-rate-discounts borrower
+            (tuple
+                (discount-percentage discount-rate)
+                (expires-at expiry)
+                (qualification-score impact-score)
+            ))
+        (ok "Impact discount granted")
+    )
+)
+
+(define-public (apply-impact-discount (borrower principal) (base-rate-new uint))
+    (let (
+        (discount (map-get? impact-rate-discounts borrower))
+    )
+        (if (is-some discount)
+            (let (
+                (discount-data (unwrap-panic discount))
+                (discount-percentage (get discount-percentage discount-data))
+            )
+                (if (> (get expires-at discount-data) block-height)
+                    (ok (- base-rate-new (/ (* base-rate-new discount-percentage) u10000)))
+                    (ok base-rate-new)))
+            (ok base-rate-new))
+    )
+)
+
+(define-read-only (get-borrower-impact-summary (borrower principal))
+    (let (
+        (impact-data (map-get? borrower-impact-scores borrower))
+        (discount-data (map-get? impact-rate-discounts borrower))
+    )
+        (ok (tuple
+            (impact-score (if (is-some impact-data) 
+                (get total-score (unwrap-panic impact-data)) u0))
+            (has-discount (is-some discount-data))
+            (discount-expires (if (is-some discount-data) 
+                (get expires-at (unwrap-panic discount-data)) u0))
+            (verified (if (is-some impact-data) 
+                (get verified (unwrap-panic impact-data)) false))
+        ))
+    )
+)
+
+(define-read-only (get-platform-impact-metrics)
+    (ok (tuple
+        (total-verified-borrowers u0)
+        (total-environmental-projects u0)
+        (total-social-projects u0)
+        (total-education-projects u0)
+        (total-healthcare-projects u0)
+        (average-impact-score u0)
+    ))
+)
+
+(define-public (update-impact-parameters 
+    (new-verifier principal)
+    (new-min-score uint)
+    (new-max-discount uint)
+)
+    (begin
+        (asserts! (is-eq tx-sender (var-get contract-owner)) (err "Not authorized"))
+        (var-set impact-verifier new-verifier)
+        (var-set min-impact-score-for-discount new-min-score)
+        (var-set max-impact-discount new-max-discount)
+        (ok "Impact parameters updated")
+    )
+)
