@@ -50,8 +50,18 @@ plan:
     - id: 0
       transactions:
         - emulated-contract-publish:
+            contract-name: dispute-resolution
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\dispute-resolution.clar"
+            clarity-version: 2
+        - emulated-contract-publish:
             contract-name: lending
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: "contracts\\lending.clar"
+            clarity-version: 2
+        - emulated-contract-publish:
+            contract-name: refinancing
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\refinancing.clar"
             clarity-version: 2
       epoch: "2.5"
